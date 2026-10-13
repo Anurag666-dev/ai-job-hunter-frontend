@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useAuthStore } from '@/store/useAuthStore';
 import { apiClient } from '@/api/client';
 import { toast } from 'sonner';
@@ -70,6 +70,21 @@ export default function Dashboard() {
   const [savedJobs, setSavedJobs] = useState<JobCard[]>([]);
   const [visitedJobs, setVisitedJobs] = useState<JobCard[]>([]);
   const [isLoadingList, setIsLoadingList] = useState(false);
+
+  // Pre-load profile on mount to sync user location automatically
+  useEffect(() => {
+    apiClient.get('/profile/me')
+      .then((res) => {
+        const p = res.data.profile;
+        if (p) {
+          setProfileData(p);
+          if (p.location && typeof p.location === 'string') {
+            setLocationQuery(p.location);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // ── Source toggle ─────────────────────────────────────────────────────────
   const toggleSource = (src: string) => {
@@ -160,7 +175,11 @@ export default function Dashboard() {
       const res = await apiClient.post('/profile/upload-cv', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setProfileData(res.data.profile);
+      const p = res.data.profile;
+      setProfileData(p);
+      if (p?.location && typeof p.location === 'string') {
+        setLocationQuery(p.location);
+      }
       toast.success('CV uploaded and profile extracted!');
     } catch {
       toast.error('CV upload failed. Ensure it is a valid PDF.');
