@@ -513,7 +513,7 @@ function JobCardComponent({
       )}
 
       {/* Areas to improve */}
-      {job.areas_to_improve.length > 0 && (
+      {Array.isArray(job.areas_to_improve) && job.areas_to_improve.length > 0 && (
         <div className="text-xs text-gray-500 space-y-1">
           <p className="font-medium text-gray-700">To improve before applying:</p>
           <ul className="list-disc list-inside space-y-0.5">
