@@ -10,5 +10,7 @@ export default defineConfig({
     alias: {
       "@": resolve(import.meta.dirname, "./src"),
     },
+    // This forces Vite to only use ONE version of React
+    dedupe: ['react', 'react-dom', 'react-router-dom'], 
   },
 })
