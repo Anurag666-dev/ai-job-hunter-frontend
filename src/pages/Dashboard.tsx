@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useAuthStore } from '@/store/useAuthStore';
 import { apiClient } from '@/api/client';
 import { toast } from 'sonner';
@@ -6,6 +6,7 @@ import {
   Bot, Briefcase, FileText, MapPin, LogOut, Search,
   SlidersHorizontal, ChevronLeft, ChevronRight, UploadCloud,
   Bookmark, BookmarkCheck, ExternalLink, Loader2, Star, CheckCircle2,
+  BarChart3, Download, Check, ArrowUpDown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -21,17 +22,23 @@ interface JobCard {
   url: string;
   source: string | null;
   relevance_score: number | null;
+  score_note?: string | null;
+  matched_keywords?: string[];
+  missing_keywords?: string[];
   areas_to_improve: string[];
   is_saved: boolean;
   is_visited: boolean;
 }
 
-type ActiveView = 'search' | 'profile' | 'saved' | 'visited';
+type ActiveView = 'search' | 'profile' | 'saved' | 'visited' | 'analytics';
 
-const SOURCES = ['Workable', 'Greenhouse', 'Wellfound', 'Lever'] as const;
+const SOURCES = ['LinkedIn', 'Indeed', 'Naukri', 'Workable', 'Greenhouse', 'Wellfound', 'Lever'] as const;
 
 // ── Source colour map ─────────────────────────────────────────────────────────
 const SOURCE_COLORS: Record<string, string> = {
+  LinkedIn: 'bg-sky-50 text-sky-700 border-sky-200',
+  Indeed: 'bg-blue-50 text-blue-800 border-blue-300',
+  Naukri: 'bg-indigo-50 text-indigo-700 border-indigo-200',
   Workable: 'bg-blue-50 text-blue-700 border-blue-200',
   Greenhouse: 'bg-green-50 text-green-700 border-green-200',
   Wellfound: 'bg-purple-50 text-purple-700 border-purple-200',
@@ -41,10 +48,12 @@ const SOURCE_COLORS: Record<string, string> = {
 // ── Score badge colour ────────────────────────────────────────────────────────
 function scoreBadge(score: number | null) {
   if (score === null) return 'bg-gray-100 text-gray-500';
-  if (score >= 75) return 'bg-green-100 text-green-700';
-  if (score >= 50) return 'bg-yellow-100 text-yellow-700';
-  return 'bg-red-100 text-red-600';
+  if (score >= 70) return 'bg-green-100 text-green-700 border border-green-200';
+  if (score >= 40) return 'bg-yellow-100 text-yellow-800 border border-yellow-200';
+  return 'bg-red-50 text-red-700 border border-red-200';
 }
+
+const JOBS_PER_PAGE = 20;
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
@@ -55,13 +64,22 @@ export default function Dashboard() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>('search');
 
-  // ── Search state ─────────────────────────────────────────────────────────
+  // ── Search & Filter state ─────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
   const [locationQuery, setLocationQuery] = useState('');
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [jobs, setJobs] = useState<JobCard[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Filtering & Sorting
+  const [sortBy, setSortBy] = useState<'match' | 'newest' | 'company'>('match');
+  const [skillFilter, setSkillFilter] = useState<string | null>(null);
+  const [salaryOnly, setSalaryOnly] = useState(false);
+  const [hideUnscorable, setHideUnscorable] = useState(false);
+  const [minScore, setMinScore] = useState<number | 'all'>('all');
+  const [showFilters, setShowFilters] = useState(false);
 
   // ── Profile / saved / visited state ──────────────────────────────────────
   const [profileData, setProfileData] = useState<Record<string, unknown> | null>(null);
@@ -100,6 +118,7 @@ export default function Dashboard() {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     setHasSearched(true);
+    setCurrentPage(1);
     try {
       const res = await apiClient.get('/jobs/search', {
         params: {
@@ -208,6 +227,136 @@ export default function Dashboard() {
     finally { setIsLoadingList(false); }
   };
 
+  // ── Derived filtered & sorted jobs ───────────────────────────────────────
+  const filteredJobs = useMemo(() => {
+    let result = [...jobs];
+
+    // Filter by single skill tag
+    if (skillFilter) {
+      result = result.filter((j) => {
+        const text = `${j.title} ${j.description || ''} ${(j.matched_keywords || []).join(' ')} ${(j.missing_keywords || []).join(' ')}`.toLowerCase();
+        return text.includes(skillFilter.toLowerCase());
+      });
+    }
+
+    // Filter by disclosed salary
+    if (salaryOnly) {
+      result = result.filter((j) => Boolean(j.salary));
+    }
+
+    // Filter out unscorable jobs
+    if (hideUnscorable) {
+      result = result.filter((j) => !j.score_note);
+    }
+
+    // Filter by minimum score
+    if (minScore !== 'all') {
+      result = result.filter((j) => j.relevance_score !== null && j.relevance_score >= minScore);
+    }
+
+    // Sort jobs
+    if (sortBy === 'match') {
+      result.sort((a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0));
+    } else if (sortBy === 'company') {
+      result.sort((a, b) => a.company.localeCompare(b.company));
+    } else if (sortBy === 'newest') {
+      // Keep original order or age
+      result.sort((a, b) => (a.posted_date ? 0 : 1) - (b.posted_date ? 0 : 1));
+    }
+
+    return result;
+  }, [jobs, skillFilter, sortBy, salaryOnly, hideUnscorable, minScore]);
+
+  // ── Market Intelligence Analytics Aggregation ─────────────────────────────
+  const analyticsData = useMemo(() => {
+    if (jobs.length === 0) return { skillCounts: [], avgScore: 0, salaryJobsCount: 0 };
+
+    const skillMap: Record<string, number> = {};
+    let totalScore = 0;
+    let scoredCount = 0;
+    let salaryCount = 0;
+
+    for (const job of jobs) {
+      if (job.relevance_score !== null && !job.score_note) {
+        totalScore += job.relevance_score;
+        scoredCount += 1;
+      }
+      if (job.salary) {
+        salaryCount += 1;
+      }
+
+      // Aggregate matched and missing skills (only from scorable jobs with descriptions)
+      if (!job.score_note) {
+        const allJobSkills = new Set([...(job.matched_keywords || []), ...(job.missing_keywords || [])]);
+        allJobSkills.forEach((s) => {
+          skillMap[s] = (skillMap[s] || 0) + 1;
+        });
+      }
+    }
+
+    const scorableJobsCount = scoredCount || 1;
+
+    const skillCounts = Object.entries(skillMap)
+      .map(([name, count]) => ({
+        name,
+        count,
+        percentage: Math.min(100, Math.round((count / scorableJobsCount) * 100)),
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const avgScore = scoredCount > 0 ? Math.round(totalScore / scoredCount) : 0;
+
+    return {
+      skillCounts,
+      avgScore,
+      salaryJobsCount: salaryCount,
+    };
+  }, [jobs]);
+
+  // ── Export Handlers ───────────────────────────────────────────────────────
+  const exportToCSV = () => {
+    if (jobs.length === 0) {
+      toast.error('No jobs to export');
+      return;
+    }
+    const headers = ['Title', 'Company', 'Source', 'Location', 'Salary', 'Match Score', 'Matched Skills', 'Missing Skills', 'URL'];
+    const rows = jobs.map((j) => [
+      `"${(j.title || '').replace(/"/g, '""')}"`,
+      `"${(j.company || '').replace(/"/g, '""')}"`,
+      `"${j.source || ''}"`,
+      `"${j.location || ''}"`,
+      `"${j.salary || ''}"`,
+      j.relevance_score !== null ? `${j.relevance_score}%` : 'N/A',
+      `"${(j.matched_keywords || []).join(', ')}"`,
+      `"${(j.missing_keywords || []).join(', ')}"`,
+      `"${j.url || ''}"`,
+    ]);
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `job_hunter_${searchQuery || 'export'}_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success('Exported jobs to CSV!');
+  };
+
+  const exportToJSON = () => {
+    if (jobs.length === 0) {
+      toast.error('No jobs to export');
+      return;
+    }
+    const blob = new Blob([JSON.stringify(jobs, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `job_hunter_${searchQuery || 'export'}_${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success('Exported jobs to JSON!');
+  };
+
   const switchView = (view: ActiveView) => {
     setActiveView(view);
     if (view === 'profile') loadProfile();
@@ -236,7 +385,7 @@ export default function Dashboard() {
         <div className="p-6 flex items-center gap-3 border-b h-20">
           <Bot className="h-8 w-8 text-green-600 flex-shrink-0" />
           {!isSidebarCollapsed && (
-            <span className="font-bold text-xl tracking-tight text-black">JobHunters</span>
+            <span className="font-bold text-xl tracking-tight text-black">Tech Job Hunters</span>
           )}
         </div>
 
@@ -244,6 +393,7 @@ export default function Dashboard() {
         <nav className="flex-1 p-4 flex flex-col gap-2">
           {[
             { view: 'search' as ActiveView, icon: <Search className="h-5 w-5 flex-shrink-0" />, label: 'Discover Jobs' },
+            { view: 'analytics' as ActiveView, icon: <BarChart3 className="h-5 w-5 flex-shrink-0 text-indigo-600" />, label: 'Market Analytics' },
             { view: 'profile' as ActiveView, icon: <FileText className="h-5 w-5 flex-shrink-0" />, label: 'Resume Profile' },
             { view: 'saved' as ActiveView, icon: <Briefcase className="h-5 w-5 flex-shrink-0" />, label: 'Saved Jobs' },
             { view: 'visited' as ActiveView, icon: <MapPin className="h-5 w-5 flex-shrink-0" />, label: 'Visited Jobs' },
@@ -280,14 +430,48 @@ export default function Dashboard() {
 
         {/* Header */}
         <header className="bg-white border-b px-8 py-5 flex justify-between items-center z-10 flex-shrink-0">
-          <h1 className="text-2xl font-bold text-black">
-            {activeView === 'search' && 'Discover Jobs'}
-            {activeView === 'profile' && 'Resume Profile'}
-            {activeView === 'saved' && 'Saved Jobs'}
-            {activeView === 'visited' && 'Visited Jobs'}
-          </h1>
-          <div className="text-sm text-gray-500">
-            Welcome back, <span className="font-semibold text-gray-900">{user?.first_name}</span>
+          <div className="flex items-center gap-4">
+            <h1 className="text-2xl font-bold text-black">
+              {activeView === 'search' && 'Discover Jobs'}
+              {activeView === 'analytics' && 'Market Intelligence & Skill Analytics'}
+              {activeView === 'profile' && 'Resume Profile'}
+              {activeView === 'saved' && 'Saved Jobs'}
+              {activeView === 'visited' && 'Visited Jobs'}
+            </h1>
+            {activeView === 'search' && jobs.length > 0 && (
+              <span className="text-xs font-semibold px-2.5 py-1 bg-green-50 text-green-700 rounded-full border border-green-200">
+                {jobs.length} jobs fetched
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Export buttons when jobs are loaded */}
+            {jobs.length > 0 && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exportToCSV}
+                  className="flex items-center gap-1.5 text-xs text-gray-700 hover:text-green-700"
+                  title="Export results to CSV spreadsheet"
+                >
+                  <Download className="h-3.5 w-3.5" /> Export CSV
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exportToJSON}
+                  className="flex items-center gap-1.5 text-xs text-gray-700 hover:text-blue-700"
+                  title="Export results to JSON"
+                >
+                  <Download className="h-3.5 w-3.5" /> JSON
+                </Button>
+              </div>
+            )}
+            <div className="text-sm text-gray-500 border-l pl-3">
+              Welcome back, <span className="font-semibold text-gray-900">{user?.first_name}</span>
+            </div>
           </div>
         </header>
 
@@ -329,10 +513,110 @@ export default function Dashboard() {
                   {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Search'}
                 </Button>
 
-                <Button variant="outline" className="h-12 w-12 p-0 rounded-lg border border-gray-200 shadow-sm">
-                  <SlidersHorizontal className="h-5 w-5 text-gray-600" />
+                <Button
+                  variant="outline"
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={`h-12 px-4 rounded-lg border border-gray-200 shadow-sm flex items-center gap-2 text-black ${showFilters ? 'bg-gray-100 font-bold' : 'bg-white hover:bg-gray-50'}`}
+                >
+                  <SlidersHorizontal className="h-4 w-4 text-black" />
+                  <span className="text-xs font-semibold text-black">Controls</span>
+                  {((sortBy !== 'match' ? 1 : 0) + (salaryOnly ? 1 : 0) + (hideUnscorable ? 1 : 0) + (minScore !== 'all' ? 1 : 0) + (skillFilter ? 1 : 0)) > 0 && (
+                    <span className="h-4 px-1.5 rounded-full bg-green-600 text-[10px] font-bold text-white flex items-center justify-center">
+                      {(sortBy !== 'match' ? 1 : 0) + (salaryOnly ? 1 : 0) + (hideUnscorable ? 1 : 0) + (minScore !== 'all' ? 1 : 0) + (skillFilter ? 1 : 0)}
+                    </span>
+                  )}
                 </Button>
               </div>
+
+              {/* Advanced Sort & Controls Bar */}
+              {showFilters && (
+                <div className="p-4 rounded-xl border border-gray-200 bg-gray-50/90 flex flex-col gap-3 animate-in fade-in duration-150">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    {/* Sort group */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-black flex items-center gap-1.5">
+                        <ArrowUpDown className="h-3.5 w-3.5 text-black" /> Sort:
+                      </span>
+                      {(['match', 'newest', 'company'] as const).map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => setSortBy(s)}
+                          className={`px-3 py-1 text-xs rounded-md font-semibold transition-colors ${
+                            sortBy === s
+                              ? 'bg-green-600 text-white shadow-sm'
+                              : 'bg-white border border-gray-200 text-black hover:bg-gray-100'
+                          }`}
+                        >
+                          {s === 'match' ? 'Mathematical % Match' : s === 'newest' ? 'Newest' : 'Company (A–Z)'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Quick Filter Toggles */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-black">Filters:</span>
+
+                      <button
+                        onClick={() => setSalaryOnly(!salaryOnly)}
+                        className={`px-3 py-1 text-xs rounded-md font-semibold border transition-colors ${
+                          salaryOnly
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white border-gray-200 text-black hover:bg-gray-100'
+                        }`}
+                      >
+                        Disclosed Pay Only
+                      </button>
+
+                      <button
+                        onClick={() => setHideUnscorable(!hideUnscorable)}
+                        className={`px-3 py-1 text-xs rounded-md font-semibold border transition-colors ${
+                          hideUnscorable
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white border-gray-200 text-black hover:bg-gray-100'
+                        }`}
+                      >
+                        With Description Only
+                      </button>
+
+                      <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-md px-2 py-0.5">
+                        <span className="text-xs font-medium text-black">Min Match:</span>
+                        <select
+                          value={minScore}
+                          onChange={(e) => setMinScore(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                          className="text-xs font-semibold bg-transparent text-black outline-none cursor-pointer"
+                        >
+                          <option value="all">All</option>
+                          <option value="40">≥ 40%</option>
+                          <option value="60">≥ 60%</option>
+                          <option value="80">≥ 80%</option>
+                        </select>
+                      </div>
+
+                      {((sortBy !== 'match' ? 1 : 0) + (salaryOnly ? 1 : 0) + (hideUnscorable ? 1 : 0) + (minScore !== 'all' ? 1 : 0) + (skillFilter ? 1 : 0)) > 0 && (
+                        <button
+                          onClick={() => {
+                            setSortBy('match');
+                            setSalaryOnly(false);
+                            setHideUnscorable(false);
+                            setMinScore('all');
+                            setSkillFilter(null);
+                          }}
+                          className="text-xs font-semibold text-red-600 hover:text-red-700 underline ml-2"
+                        >
+                          Reset All
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {skillFilter && (
+                    <div className="flex items-center gap-2 bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-xs font-medium border border-blue-200 self-start">
+                      <span>Filtered by skill: <strong>{skillFilter}</strong></span>
+                      <button onClick={() => setSkillFilter(null)} className="hover:text-blue-900 font-bold ml-1">✕</button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Source filter buttons */}
               <div className="flex items-center gap-3 flex-wrap">
@@ -369,25 +653,89 @@ export default function Dashboard() {
               {isSearching && (
                 <div className="flex items-center justify-center py-20">
                   <Loader2 className="h-8 w-8 animate-spin text-green-600" />
-                  <span className="ml-3 text-gray-500">Searching and scoring jobs…</span>
+                  <span className="ml-3 text-gray-500 font-medium">Extracting keywords & computing match percentages…</span>
                 </div>
               )}
 
-              {!isSearching && hasSearched && jobs.length === 0 && (
-                <div className="text-center py-20 text-gray-400">No jobs found. Try different keywords or sources.</div>
+              {!isSearching && hasSearched && filteredJobs.length === 0 && (
+                <div className="text-center py-20 text-gray-400">
+                  {skillFilter
+                    ? `No jobs found requiring '${skillFilter}'. Try clearing the skill filter.`
+                    : 'No jobs found. Try different keywords or sources.'}
+                </div>
               )}
 
-              {!isSearching && jobs.length > 0 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-                  {jobs.map((job) => (
-                    <JobCardComponent
-                      key={job.job_hash}
-                      job={job}
-                      onSave={handleSave}
-                      onApply={handleApply}
-                    />
-                  ))}
-                </div>
+              {!isSearching && filteredJobs.length > 0 && (
+                <>
+                  <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                    <span>
+                      Showing {((currentPage - 1) * JOBS_PER_PAGE) + 1}–{Math.min(currentPage * JOBS_PER_PAGE, filteredJobs.length)} of {filteredJobs.length} jobs
+                    </span>
+                    <span>Page {currentPage} of {Math.ceil(filteredJobs.length / JOBS_PER_PAGE)}</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                    {filteredJobs.slice((currentPage - 1) * JOBS_PER_PAGE, currentPage * JOBS_PER_PAGE).map((job) => (
+                      <JobCardComponent
+                        key={job.job_hash}
+                        job={job}
+                        onSave={handleSave}
+                        onApply={handleApply}
+                        onFilterBySkill={(skill) => setSkillFilter(skill)}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Pagination Controls */}
+                  {Math.ceil(filteredJobs.length / JOBS_PER_PAGE) > 1 && (
+                    <div className="flex items-center justify-center gap-3 mt-8 pb-4">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={currentPage === 1}
+                        onClick={() => {
+                          setCurrentPage((p) => Math.max(1, p - 1));
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="flex items-center gap-1"
+                      >
+                        <ChevronLeft className="h-4 w-4" /> Previous
+                      </Button>
+
+                      <div className="flex items-center gap-1.5">
+                        {Array.from({ length: Math.ceil(filteredJobs.length / JOBS_PER_PAGE) }).map((_, i) => (
+                          <button
+                            key={i + 1}
+                            onClick={() => {
+                              setCurrentPage(i + 1);
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                            }}
+                            className={`w-8 h-8 rounded-lg text-xs font-semibold transition-all ${
+                              currentPage === i + 1
+                                ? 'bg-green-600 text-white shadow-sm'
+                                : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+                            }`}
+                          >
+                            {i + 1}
+                          </button>
+                        ))}
+                      </div>
+
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={currentPage === Math.ceil(filteredJobs.length / JOBS_PER_PAGE)}
+                        onClick={() => {
+                          setCurrentPage((p) => Math.min(Math.ceil(filteredJobs.length / JOBS_PER_PAGE), p + 1));
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="flex items-center gap-1"
+                      >
+                        Next <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
+                </>
               )}
 
               {!hasSearched && (
@@ -395,6 +743,91 @@ export default function Dashboard() {
                   <Search className="h-12 w-12 mb-4 opacity-30" />
                   <p className="text-lg">Search a role to discover jobs across platforms</p>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* ── MARKET ANALYTICS VIEW ────────────────────────────────────── */}
+          {activeView === 'analytics' && (
+            <div className="p-8 max-w-6xl mx-auto space-y-8">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Search Market Intelligence</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Aggregated skill demand, hiring volume, and tech stack distribution for "{searchQuery || 'current role'}"
+                  {locationQuery ? ` in ${locationQuery}` : ''}.
+                </p>
+              </div>
+
+              {jobs.length === 0 ? (
+                <div className="p-12 text-center border rounded-2xl bg-gray-50 text-gray-500">
+                  <BarChart3 className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                  <h3 className="font-semibold text-lg text-gray-700">No Search Data Yet</h3>
+                  <p className="text-sm text-gray-500 mt-1">Perform a job search in "Discover Jobs" to visualize real-time skill demand and hiring company distributions.</p>
+                  <Button onClick={() => switchView('search')} className="mt-4 bg-green-600 hover:bg-green-700 text-white">
+                    Go to Search
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  {/* Top Metric Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div className="p-5 rounded-xl border bg-white shadow-sm">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Positions</span>
+                      <p className="text-2xl font-bold text-gray-900 mt-1">{jobs.length}</p>
+                      <span className="text-xs text-gray-400">Across {selectedSources.length || SOURCES.length} platforms</span>
+                    </div>
+
+                    <div className="p-5 rounded-xl border bg-white shadow-sm">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Avg Profile Match</span>
+                      <p className="text-2xl font-bold text-emerald-600 mt-1">{analyticsData.avgScore}%</p>
+                      <span className="text-xs text-gray-400">Exact formula keyword match</span>
+                    </div>
+
+                    <div className="p-5 rounded-xl border bg-white shadow-sm">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Skills Tracked</span>
+                      <p className="text-2xl font-bold text-indigo-600 mt-1">{analyticsData.skillCounts.length}</p>
+                      <span className="text-xs text-gray-400">Extracted from listings</span>
+                    </div>
+
+                    <div className="p-5 rounded-xl border bg-white shadow-sm">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Transparent Salary</span>
+                      <p className="text-2xl font-bold text-blue-600 mt-1">{analyticsData.salaryJobsCount}</p>
+                      <span className="text-xs text-gray-400">Listings disclosing pay</span>
+                    </div>
+                  </div>
+
+                  {/* Skill Frequency Distribution Bars */}
+                  <div className="p-6 rounded-2xl border bg-white shadow-sm space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="font-bold text-lg text-gray-900">Most Demanded Skills & Technologies</h3>
+                        <p className="text-xs text-gray-500">Percentage of active postings requiring each skill</p>
+                      </div>
+                      <span className="text-xs text-gray-400 font-medium">Ranked by frequency</span>
+                    </div>
+
+                    <div className="space-y-3.5">
+                      {analyticsData.skillCounts.slice(0, 12).map((item) => (
+                        <div key={item.name} className="space-y-1">
+                          <div className="flex justify-between items-center text-xs font-medium text-gray-700">
+                            <span className="flex items-center gap-2">
+                              <span className="font-semibold text-gray-900">{item.name}</span>
+                              <span className="text-gray-400 font-normal">({item.count} jobs)</span>
+                            </span>
+                            <span className="font-bold text-emerald-700">{item.percentage}%</span>
+                          </div>
+                          <div className="h-2.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-emerald-500 to-green-600 rounded-full transition-all duration-500"
+                              style={{ width: `${item.percentage}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                </>
               )}
             </div>
           )}
@@ -472,14 +905,20 @@ function JobCardComponent({
   job,
   onSave,
   onApply,
+  onFilterBySkill,
   readonly = false,
 }: {
   job: JobCard;
   onSave: (job: JobCard) => void;
   onApply: (job: JobCard) => void;
+  onFilterBySkill?: (skill: string) => void;
   readonly?: boolean;
 }) {
   const srcColor = SOURCE_COLORS[job.source || ''] ?? 'bg-gray-50 text-gray-600 border-gray-200';
+
+  const matched = job.matched_keywords || [];
+  const missing = job.missing_keywords || [];
+  const totalKeywords = matched.length + missing.length;
 
   return (
     <div className={`relative flex flex-col gap-3 p-5 rounded-xl border bg-white shadow-sm hover:shadow-md transition-shadow ${job.is_visited ? 'border-blue-200' : 'border-gray-200'}`}>
@@ -510,7 +949,7 @@ function JobCardComponent({
           </span>
         )}
         {job.salary && (
-          <span className="text-xs text-green-700 font-medium">{job.salary}</span>
+          <span className="text-xs text-green-700 font-semibold bg-green-50 px-2 py-0.5 rounded border border-green-200">{job.salary}</span>
         )}
         {job.posted_date && (
           <span className="text-xs text-gray-400 ml-auto">{job.posted_date}</span>
@@ -522,20 +961,64 @@ function JobCardComponent({
         <p className="text-sm text-gray-600 line-clamp-3 leading-relaxed">{job.description}</p>
       )}
 
-      {/* AI relevance score */}
-      {job.relevance_score !== null && (
-        <div className="flex items-start gap-2">
-          <span className={`flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${scoreBadge(job.relevance_score)}`}>
-            <Star className="h-3 w-3" /> {job.relevance_score}% match
+      {/* Unscorable notification if description is not visible */}
+      {job.score_note ? (
+        <div className="pt-2 border-t border-gray-100 flex items-center justify-between">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+            {job.score_note}
           </span>
+          <span className="text-[11px] text-gray-400 italic">Open job link to read full listing</span>
+        </div>
+      ) : job.relevance_score !== null && (
+        <div className="pt-2 border-t border-gray-100 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold ${scoreBadge(job.relevance_score)}`}>
+              <Star className="h-3 w-3 fill-current" /> {job.relevance_score}% Match
+            </span>
+            {totalKeywords > 0 && (
+              <span className="text-[11px] text-gray-500 font-medium">
+                {matched.length}/{totalKeywords} required skills on your profile
+              </span>
+            )}
+          </div>
+
+          {/* Matched & Missing Skills Badges */}
+          {(matched.length > 0 || missing.length > 0) && (
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {matched.map((skill) => (
+                <button
+                  key={skill}
+                  type="button"
+                  onClick={() => onFilterBySkill?.(skill)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 transition-colors"
+                  title={`Filter all jobs by ${skill}`}
+                >
+                  <Check className="h-3 w-3 text-emerald-600" /> {skill}
+                </button>
+              ))}
+
+              {missing.map((skill) => (
+                <button
+                  key={skill}
+                  type="button"
+                  onClick={() => onFilterBySkill?.(skill)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 transition-colors"
+                  title={`Required by job but not found on your profile. Click to filter.`}
+                >
+                  <span className="text-red-500 font-bold">✕</span> {skill}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* Areas to improve */}
       {Array.isArray(job.areas_to_improve) && job.areas_to_improve.length > 0 && (
-        <div className="text-xs text-gray-500 space-y-1">
-          <p className="font-medium text-gray-700">To improve before applying:</p>
-          <ul className="list-disc list-inside space-y-0.5">
+        <div className="text-xs text-gray-500 space-y-1 bg-gray-50/70 p-2.5 rounded-lg border border-gray-100">
+          <p className="font-semibold text-gray-700">To improve before applying:</p>
+          <ul className="list-disc list-inside space-y-0.5 text-gray-600">
             {job.areas_to_improve.map((tip, i) => <li key={i}>{tip}</li>)}
           </ul>
         </div>
@@ -608,7 +1091,7 @@ function ProfileView({ profile }: { profile: Record<string, unknown> }) {
             ) : null,
           )}
         </div>
-        {profile.summary && (
+        {Boolean(profile.summary) && (
           <p className="mt-3 text-sm text-gray-600 leading-relaxed">{profile.summary as string}</p>
         )}
       </Section>
@@ -652,15 +1135,15 @@ function ProfileView({ profile }: { profile: Record<string, unknown> }) {
               <div key={i} className="p-4 rounded-lg border border-gray-100 bg-gray-50">
                 <div className="flex items-center gap-2">
                   <p className="font-medium text-gray-800">{exp.role as string}</p>
-                  {exp.is_internship && (
+                  {Boolean(exp.is_internship) && (
                     <span className="px-2 py-0.5 bg-orange-50 text-orange-600 border border-orange-200 rounded-full text-xs">Internship</span>
                   )}
                 </div>
                 <p className="text-sm text-gray-600">{exp.company as string}</p>
-                {(exp.start_date || exp.end_date) && (
+                {Boolean(exp.start_date || exp.end_date) && (
                   <p className="text-xs text-gray-400 mt-1">{exp.start_date as string} — {(exp.end_date as string) || 'Present'}</p>
                 )}
-                {exp.description && <p className="text-xs text-gray-500 mt-2">{exp.description as string}</p>}
+                {Boolean(exp.description) && <p className="text-xs text-gray-500 mt-2">{exp.description as string}</p>}
               </div>
             ))}
           </div>
@@ -675,16 +1158,16 @@ function ProfileView({ profile }: { profile: Record<string, unknown> }) {
               <div key={i} className="p-4 rounded-lg border border-gray-100 bg-gray-50">
                 <div className="flex items-center gap-2">
                   <p className="font-medium text-gray-800">{proj.name as string}</p>
-                  {proj.url && (
+                  {Boolean(proj.url) && (
                     <a href={proj.url as string} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline text-xs">
                       <ExternalLink className="h-3 w-3 inline" /> link
                     </a>
                   )}
                 </div>
-                {(proj.start_date || proj.end_date) && (
+                {Boolean(proj.start_date || proj.end_date) && (
                   <p className="text-xs text-gray-400">{proj.start_date as string} — {(proj.end_date as string) || 'Present'}</p>
                 )}
-                {proj.description && <p className="text-xs text-gray-500 mt-1">{proj.description as string}</p>}
+                {Boolean(proj.description) && <p className="text-xs text-gray-500 mt-1">{proj.description as string}</p>}
                 {(proj.tech_stack as string[])?.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-2">
                     {(proj.tech_stack as string[]).map((t) => (

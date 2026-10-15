@@ -1,6 +1,6 @@
 // src/pages/Landing.tsx
 import { Button } from "@/components/ui/button";
-import { ArrowRight, Bot, Briefcase, Sparkles, Search, CheckCircle2 } from "lucide-react";
+import { ArrowRight, Bot, Briefcase, Sparkles, Search } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 export default function Landing() { 
@@ -13,7 +13,7 @@ export default function Landing() {
       <header className="flex items-center justify-between p-6 max-w-7xl mx-auto border-b border-gray-100">
         <div className="flex items-center gap-2 font-bold text-xl tracking-tight text-gray-900">
           <Bot className="h-6 w-6 text-green-600" />
-          <span>AI Job Hunter</span>
+          <span>Tech Job Hunters</span>
         </div>
         <nav className="flex gap-4 items-center">
           <Button variant="ghost" onClick={() => navigate('/signin')} className="text-gray-600 hover:text-gray-900">Sign In</Button>

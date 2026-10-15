@@ -54,8 +54,16 @@ export default function SignUp() {
             } else {
                 throw new Error('Got no response from server, please try again later');
             }
-        } catch (err) {
-            setError('Signup failed, please check your connection or ' + err);
+        } catch (err: any) {
+            const status = err?.response?.status;
+            const detail = err?.response?.data?.detail;
+            if (status === 409 || detail === "Email already registered") {
+                setError("This email is already registered. Please sign in instead.");
+            } else if (detail) {
+                setError(typeof detail === "string" ? detail : "Registration failed.");
+            } else {
+                setError("Signup failed. Please check your connection and try again.");
+            }
         }
     };
 
@@ -64,7 +72,7 @@ export default function SignUp() {
             <Card className='w-full max-w-md shadow-xl border border-gray-100 bg-white'>
                 <CardHeader>
                     <CardTitle className="text-2xl font-bold text-gray-900">Create Account</CardTitle>
-                    <CardDescription className='text-gray-500'>Join the AI Job Hunter Platform.</CardDescription>
+                    <CardDescription className='text-gray-500'>Join the Tech Job Hunters Platform.</CardDescription>
                 </CardHeader>
 
                 <CardContent>
